@@ -1,0 +1,22 @@
+# general_quoter_config.csv
+
+quoting.max_market_width,           15.0
+quoting.typical_market_volume,      100
+quoting.order_volume_multiplier,    0.01
+quoting.min_edge_at_50c,            3.0
+quoting.absolute_min_edge,          1.0
+quoting.max_edge,                   5.0
+quoting.min_levels,                 3
+quoting.sweep_levels,               5
+quoting.sweep_cooldown_seconds,     10
+quoting.reprice_bounds,             1.0
+quoting.poll_interval_seconds,      1.0
+quoting.price_bound_low,            3.0
+quoting.price_bound_high,           97.0
+
+risk.max_position_per_side,         200
+risk.skew_start_fraction,           0.5
+risk.skew_max_shift_cents,          3.0
+risk.halt_unhedged_threshold,       200
+
+execution.trading_enabled,          True
