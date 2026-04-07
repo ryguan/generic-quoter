@@ -325,6 +325,19 @@ class GeneralQuoterEngine:
                     )
                     log.info(f"Placed {tgt['ticker']} {tgt['side']} @ {tgt['limit']}c x {tgt['qty']}")
                     
+                    order_id = res.get("order", {}).get("order_id", "")
+                    state_store.append_order({
+                        "order_id": order_id,
+                        "client_order_id": uid,
+                        "ticker": tgt['ticker'],
+                        "side": tgt['side'],
+                        "limit_cents": tgt['limit'],
+                        "count": tgt['qty'],
+                        "filled_count": 0,
+                        "ts": time.time(),
+                        "game": "Resting/Replacing"
+                    })
+                    
                     self.active_quotes[k] = ActiveQuote(
                         side=QuoteSide.TEAM_A, # Generic
                         target_ticker=tgt['ticker'],

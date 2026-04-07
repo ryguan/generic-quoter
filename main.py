@@ -13,6 +13,7 @@ import os
 
 from general_quoter_config import load_general_quoter_config
 from general_quoter_engine import GeneralQuoterEngine
+from dashboard_app import DashboardServer
 from kalshi_client import KalshiClient
 from kalshi_auth import KalshiAuth
 
@@ -78,6 +79,12 @@ async def async_main():
         sys.exit(1)
         
     engine = GeneralQuoterEngine(client, config, final_tickers)
+    # Start Dashboard Server
+    log.info("Starting Dashboard server on port 7340...")
+    dash = DashboardServer(auth=auth)
+    dash.start()
+
+    log.info("Starting Quoter Engine Event Loop...")
     await engine.start()
 
 def main():
