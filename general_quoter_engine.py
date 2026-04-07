@@ -11,7 +11,7 @@ import uuid
 from typing import Optional, Dict, List, Tuple
 
 from general_quoter_config import GeneralQuoterConfig
-from general_quoter_models import MarketData, QuoteSide, QuoteStatus, ActiveQuote, calculate_logit_min_edge, calculate_positional_skew
+from general_quoter_models import MarketData, QuoteSide, QuoteStatus, ActiveQuote, QuoteTarget, OrderRecord, calculate_logit_min_edge, calculate_positional_skew
 from kalshi_client import KalshiClient
 import state_store
 
@@ -36,16 +36,13 @@ class GeneralQuoterEngine:
         
         # Load legacy positions accurately on boot
         try:
-            data = state_store.load()
+            orders = state_store.load_orders()
             count = 0
-            for o in data.get("orders", []):
-                t = o.get("ticker", "")
-                s = o.get("side", "")
-                fc = int(o.get("filled_count", 0))
-                if t and s and fc > 0:
-                    key = f"{t}_{s}"
-                    self.positions[key] = self.positions.get(key, 0) + fc
-                    count += fc
+            for o in orders:
+                if o.ticker and o.side and o.filled_count > 0:
+                    key = f"{o.ticker}_{o.side}"
+                    self.positions[key] = self.positions.get(key, 0) + o.filled_count
+                    count += o.filled_count
             log.info(f"Loaded {count} existing Kalshi position lots from state store.")
         except Exception as e:
             log.error(f"Error loading legacy positions: {e}")
@@ -176,20 +173,7 @@ class GeneralQuoterEngine:
 
         for t in self.tickers:
             try:
-                ob = await asyncio.to_thread(self.client.get_orderbook, t)
-                bids = ob.get("orderbook", {}).get("yes", [])
-                asks = ob.get("orderbook", {}).get("no", [])
-                if not bids:
-                    fp_bids = ob.get("orderbook_fp", {}).get("yes_dollars", [])
-                    bids = [(int(round(float(p) * 100)), int(float(v))) for p, v in fp_bids]
-                if not asks:
-                    fp_asks = ob.get("orderbook_fp", {}).get("no_dollars", [])
-                    asks = [(int(round(float(p) * 100)), int(float(v))) for p, v in fp_asks]
-                
-                bids.sort(key=lambda x: x[0], reverse=True)
-                asks.sort(key=lambda x: x[0], reverse=True)
-                self.orderbooks[t].yes_ob = bids
-                self.orderbooks[t].no_ob = asks
+                self.orderbooks[t] = await asyncio.to_thread(self.client.get_orderbook, t)
             except Exception as e:
                 log.error(f"Failed to fetch orderbook for {t}: {e}")
                 return
@@ -276,78 +260,77 @@ class GeneralQuoterEngine:
                     log.info(f"[{t} {side}] Ignored: Calculated order quantity is 0 (Typical {self.config.TYPICAL_MARKET_VOLUME} * Multiplier {self.config.ORDER_VOLUME_MULTIPLIER}).")
                     continue
 
-                targets.append({
-                    "ticker": t,
-                    "side": side,
-                    "limit": int(target_limit),
-                    "qty": qty
-                })
+                targets.append(QuoteTarget(
+                    ticker=t,
+                    side=side,
+                    limit=int(target_limit),
+                    qty=qty,
+                ))
 
         # Phase 6: Sync Polling Replacement Logic
         # Back up orders physically on book that violate the current optimal limits
         for tgt in targets:
-            k = f"{tgt['ticker']}_{tgt['side']}"
+            k = f"{tgt.ticker}_{tgt.side}"
             active = self.active_quotes.get(k)
-            
+
             needs_firing = False
             if not active or active.status != QuoteStatus.RESTING:
                 needs_firing = True
             else:
                 current_price = active.price_cents
-                drift = current_price - tgt['limit']
-                
+                drift = current_price - tgt.limit
+
                 # Price is mathematically WORSE (bidding too high) -> cancel & drop
                 if drift > 0:
-                    log.info(f"Target dropped ({current_price} -> {tgt['limit']}). Replacing...")
+                    log.info(f"Target dropped ({current_price} -> {tgt.limit}). Replacing...")
                     try:
                         await asyncio.to_thread(self.client.cancel_order, active.kalshi_order_id)
                         needs_firing = True
                     except: pass
                 # Price is BETTER (bidding too low) -> wait unless drift violently exceeds REPRICE_BOUNDS
                 elif drift < -self.config.REPRICE_BOUNDS:
-                    log.info(f"Target lifted beyond reprice bound ({current_price} -> {tgt['limit']}). Replacing...")
+                    log.info(f"Target lifted beyond reprice bound ({current_price} -> {tgt.limit}). Replacing...")
                     try:
                         await asyncio.to_thread(self.client.cancel_order, active.kalshi_order_id)
                         needs_firing = True
                     except: pass
-            
+
             if needs_firing:
                 uid = str(uuid.uuid4())
                 try:
-                    res = await asyncio.to_thread(
+                    placed = await asyncio.to_thread(
                         self.client.place_order,
                         client_order_id=uid,
-                        ticker=tgt['ticker'],
-                        side=tgt['side'],
-                        count=tgt['qty'],
-                        limit_cents=tgt['limit'],
+                        ticker=tgt.ticker,
+                        side=tgt.side,
+                        count=tgt.qty,
+                        limit_cents=tgt.limit,
                         time_in_force="good_til_canceled"
                     )
-                    log.info(f"Placed {tgt['ticker']} {tgt['side']} @ {tgt['limit']}c x {tgt['qty']}")
-                    
-                    order_id = res.get("order", {}).get("order_id", "")
-                    state_store.append_order({
-                        "order_id": order_id,
-                        "client_order_id": uid,
-                        "ticker": tgt['ticker'],
-                        "side": tgt['side'],
-                        "limit_cents": tgt['limit'],
-                        "count": tgt['qty'],
-                        "filled_count": 0,
-                        "ts": time.time(),
-                        "game": "Resting/Replacing"
-                    })
-                    
-                    self.active_quotes[k] = ActiveQuote(
-                        side=QuoteSide.TEAM_A, # Generic
-                        target_ticker=tgt['ticker'],
-                        intent="buy",
-                        price_cents=tgt['limit'],
-                        qty=tgt['qty'],
+                    log.info(f"Placed {tgt.ticker} {tgt.side} @ {tgt.limit}c x {tgt.qty}")
+
+                    state_store.append_order(OrderRecord(
+                        order_id=placed.order_id,
                         client_order_id=uid,
-                        kalshi_order_id=res.get("order", {}).get("order_id", ""),
+                        ticker=tgt.ticker,
+                        side=tgt.side,
+                        limit_cents=tgt.limit,
+                        count=tgt.qty,
+                        filled_count=0,
+                        ts=time.time(),
+                        game="Resting/Replacing",
+                    ))
+
+                    self.active_quotes[k] = ActiveQuote(
+                        side=QuoteSide.TEAM_A,
+                        target_ticker=tgt.ticker,
+                        intent="buy",
+                        price_cents=tgt.limit,
+                        qty=tgt.qty,
+                        client_order_id=uid,
+                        kalshi_order_id=placed.order_id,
                         status=QuoteStatus.RESTING,
                         placed_at=time.time()
                     )
                 except Exception as e:
-                    log.error(f"Failed to place {tgt['ticker']}: {e}")
+                    log.error(f"Failed to place {tgt.ticker}: {e}")

@@ -1,5 +1,8 @@
 import time
 import requests
+
+from general_quoter_models import MarketData, PlacedOrder
+
 KALSHI_API_BASE = "https://api.elections.kalshi.com"
 
 class KalshiClient:
@@ -36,11 +39,28 @@ class KalshiClient:
         path = f"/trade-api/v2/markets/{ticker}"
         return self._get(path)
 
-    def get_orderbook(self, ticker: str) -> dict:
+    def get_orderbook(self, ticker: str) -> MarketData:
         path = f"/trade-api/v2/markets/{ticker}/orderbook"
-        return self._get(path)
+        raw = self._get(path)
 
-    def place_order(self, client_order_id: str, ticker: str, side: str, count: int, limit_cents: int, time_in_force: str = "fill_or_kill") -> dict:
+        raw_yes = raw.get("orderbook", {}).get("yes", [])
+        raw_no = raw.get("orderbook", {}).get("no", [])
+
+        if not raw_yes:
+            fp_yes = raw.get("orderbook_fp", {}).get("yes_dollars", [])
+            raw_yes = [(int(round(float(p) * 100)), int(float(v))) for p, v in fp_yes]
+        if not raw_no:
+            fp_no = raw.get("orderbook_fp", {}).get("no_dollars", [])
+            raw_no = [(int(round(float(p) * 100)), int(float(v))) for p, v in fp_no]
+
+        yes_ob = [(int(p), int(q)) for p, q in raw_yes]
+        no_ob = [(int(p), int(q)) for p, q in raw_no]
+        yes_ob.sort(key=lambda x: x[0], reverse=True)
+        no_ob.sort(key=lambda x: x[0], reverse=True)
+
+        return MarketData(ticker=ticker, yes_ob=yes_ob, no_ob=no_ob)
+
+    def place_order(self, client_order_id: str, ticker: str, side: str, count: int, limit_cents: int, time_in_force: str = "fill_or_kill") -> PlacedOrder:
         """
         side: 'yes' or 'no'
         limit_cents: integer from 1 to 99
@@ -70,8 +90,8 @@ class KalshiClient:
             body["yes_price"] = limit_cents
         else:
             body["no_price"] = limit_cents
-            
-        return self._post(path, body)
+
+        return PlacedOrder.from_api_response(self._post(path, body))
 
     def place_order_batch(self, orders: list[dict]) -> dict:
         """
