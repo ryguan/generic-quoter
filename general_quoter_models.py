@@ -3,6 +3,7 @@ general_quoter_models.py
 Data structures and mathematical bounded calculators for the General Quoter Algorithm.
 """
 
+import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -52,6 +53,107 @@ class QuoteCalculation:
     final_limit: int
     qty: int
     reason: str
+
+@dataclass
+class QuoteTarget:
+    """Ephemeral pricing target computed each poll cycle."""
+    ticker: str
+    side: str
+    limit: int
+    qty: int
+
+@dataclass
+class OrderRecord:
+    """Persistent order record for state store serialization."""
+    order_id: str
+    client_order_id: str
+    ticker: str
+    side: str
+    limit_cents: int
+    count: int
+    filled_count: int = 0
+    fill_cents: int = 0
+    ts: float = 0.0
+    game: str = ""
+    intent_count: int = 0
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'OrderRecord':
+        return cls(
+            order_id=d.get("order_id", ""),
+            client_order_id=d.get("client_order_id", ""),
+            ticker=d.get("ticker", ""),
+            side=d.get("side", ""),
+            limit_cents=int(d.get("limit_cents", 0)),
+            count=int(d.get("count", 0)),
+            filled_count=int(d.get("filled_count", 0)),
+            fill_cents=int(d.get("fill_cents", 0)),
+            ts=float(d.get("ts", 0.0)),
+            game=d.get("game", ""),
+            intent_count=int(d.get("intent_count", 0)),
+        )
+
+@dataclass
+class PlacedOrder:
+    """Typed response from the Kalshi place-order API."""
+    order_id: str
+
+    @classmethod
+    def from_api_response(cls, resp: dict) -> 'PlacedOrder':
+        return cls(order_id=resp.get("order", {}).get("order_id", ""))
+
+@dataclass
+class TradeRow:
+    """Single trade row for dashboard display."""
+    ts_str: str
+    game_matchup: str
+    ticker_type: str
+    ticker_short: str
+    ticker: str
+    exec_type: str
+    side: str
+    limit_cents: int
+    fill_cents: int
+    count: int
+    filled_count: int
+    pnl_cents: float
+    fee_cents: float
+    current_cents: Optional[float] = None
+    mature: bool = False
+    mark_30s_cents: Optional[int] = None
+    mark_120s_cents: Optional[int] = None
+    pnl_30s_cents: Optional[float] = None
+    pnl_120s_cents: Optional[float] = None
+    dry_run: bool = False
+    sweep_id: str = ""
+
+@dataclass
+class PositionRow:
+    """Net position for dashboard display."""
+    ticker_suffix: str
+    direction: str
+    lots: int
+    current_cents: Optional[float] = None
+
+@dataclass
+class TradesResponse:
+    """Full /api/trades JSON response."""
+    trades: list[TradeRow]
+    positions: list[PositionRow]
+    pnl_cents: float
+    fee_cents: float
+    games: list[str]
+    per_game_pnl: dict
+    per_game_fees: dict
+    timestamp: str = ""
+    sweeps: list = field(default_factory=list)
+    per_sweep_pnl: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
 
 def calculate_logit_min_edge(cents_price: float, min_edge_50c: float, absolute_min_edge: float) -> float:
     """

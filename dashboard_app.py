@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import state_store
+from general_quoter_models import TradeRow, PositionRow, TradesResponse
 
 class DashboardServer:
     def __init__(self, auth, dashboard_port=7340):
@@ -27,47 +28,43 @@ class DashboardServer:
     def _order_sync_daemon(self):
         import requests
         BASE = "https://api.elections.kalshi.com"
-        
+
         while True:
             time.sleep(10)
             try:
-                state = state_store.load()
-                orders = state.get("orders", [])
+                orders = state_store.load_orders()
                 if not orders:
                     continue
-                    
+
                 path = "/trade-api/v2/portfolio/fills"
                 hdrs = self.auth.get_headers("GET", path)
                 resp = requests.get(BASE + path, params={"limit": 500}, headers=hdrs, timeout=5)
                 if resp.status_code != 200:
                     continue
-                    
+
                 fills_data = resp.json().get("fills", [])
-                from collections import defaultdict
                 fills_by_order = defaultdict(list)
                 for f in fills_data:
                     fills_by_order[f.get("order_id")].append(f)
-                    
+
                 for order in orders:
-                    o_id = order.get("order_id")
-                    if not o_id:
+                    if not order.order_id:
                         continue
-                        
-                    ofills = fills_by_order.get(o_id)
+
+                    ofills = fills_by_order.get(order.order_id)
                     if not ofills:
                         continue
-                        
-                    price_key = "yes_price_dollars" if order.get("side") == "yes" else "no_price_dollars"
+
+                    price_key = "yes_price_dollars" if order.side == "yes" else "no_price_dollars"
                     tq = sum(float(f.get("count_fp", 0)) for f in ofills)
-                    
-                    local_count = order.get("filled_count", 0)
-                    if tq > local_count:
+
+                    if tq > order.filled_count:
                         wavg = sum(float(f.get(price_key, 0)) * float(f.get("count_fp", 0)) for f in ofills) / tq
-                        order["fill_cents"] = round(wavg * 100)
-                        order["filled_count"] = round(tq)
-                        state_store.patch_order(o_id, fill_cents=order["fill_cents"], filled_count=order["filled_count"])
-                        
-            except Exception as e:
+                        fill_cents = round(wavg * 100)
+                        filled_count = round(tq)
+                        state_store.patch_order(order.order_id, fill_cents=fill_cents, filled_count=filled_count)
+
+            except Exception:
                 pass
 
     def _start_http_server(self):
@@ -97,34 +94,34 @@ class DashboardServer:
                     def _ts(ts):
                         return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone().strftime("%H:%M:%S")
 
-                    state = state_store.load()
+                    orders = state_store.load_orders()
                     with server_instance._price_lock:
                         price_snapshot = dict(server_instance._latest_prices)
-                    
-                    all_orders = []
-                    for order in state.get("orders", []):
-                        raw_ticker = order.get("ticker", "")
-                        fc = order.get("filled_count", order.get("count", 0))
-                        
+
+                    all_trades: list[TradeRow] = []
+                    for order in orders:
+                        raw_ticker = order.ticker
+                        fc = order.filled_count if order.filled_count else order.count
+
                         # Dashboard filter: Hide unfilled passive liquidity
                         if fc == 0:
                             continue
 
                         cur_yes = price_snapshot.get(raw_ticker)
-                        fill_c = order.get("fill_cents", order.get("limit_cents", 0))
-                        
-                        if order["side"] == "yes":
+                        fill_c = order.fill_cents if order.fill_cents else order.limit_cents
+
+                        if order.side == "yes":
                             cur_v = cur_yes if cur_yes is not None else fill_c
                         else:
                             cur_v = (100 - cur_yes) if cur_yes is not None else fill_c
-                            
+
                         fee_c = round(7.0 * (fill_c / 100.0) * (1.0 - fill_c / 100.0) * fc) if fc > 0 else 0
                         pnl_c = (cur_v - fill_c) * fc - fee_c if fc > 0 and cur_v is not None else 0
 
                         ticker_type = "Esports Match"
-                        game_matchup = order.get("game", raw_ticker)
-                        exec_type = "Sweep" if order.get("intent_count", 0) > 0 else "Resting"
-                            
+                        game_matchup = order.game if order.game else raw_ticker
+                        exec_type = "Sweep" if order.intent_count > 0 else "Resting"
+
                         # Try parsing nice team names if conventional format CS2
                         parts = raw_ticker.split('-')
                         if len(parts) >= 2:
@@ -132,78 +129,70 @@ class DashboardServer:
                             if len(s) == 6 or len(s) == 5:
                                 game_matchup = f"{s[:len(s)//2]} vs {s[len(s)//2:]}"
 
-                        display_ts = order.get("ts", now)
-                        
+                        display_ts = order.ts if order.ts else now
+
                         ticker_short_parts = raw_ticker.split('-')
                         ticker_short = ticker_short_parts[-1] if ticker_short_parts else raw_ticker
-                        
-                        all_orders.append({
-                            "ts_str": _ts(display_ts),
-                            "game_matchup": game_matchup.upper(),
-                            "ticker_type": ticker_type,
-                            "ticker_short": ticker_short,
-                            "ticker": raw_ticker,
-                            "exec_type": exec_type,
-                            "side": order["side"],
-                            "limit_cents": order.get("limit_cents", 0),
-                            "fill_cents": fill_c,
-                            "count": order.get("intent_count", fc),
-                            "filled_count": fc,
-                            "mature": False,
-                            "mark_30s_cents": None,
-                            "mark_120s_cents": None,
-                            "current_cents": cur_v,
-                            "pnl_cents": pnl_c,
-                            "pnl_30s_cents": None,
-                            "pnl_120s_cents": None,
-                            "fee_cents": fee_c,
-                            "dry_run": False,
-                            "sweep_id": ""
-                        })
 
-                    all_orders.sort(key=lambda o: o["ts_str"], reverse=True)
-                    
-                    net_lots = {}
-                    for order in state.get("orders", []):
-                        t = order.get("ticker", "")
-                        fc = order.get("filled_count", 0)
-                        if fc == 0: continue
-                        delta = fc if order["side"] == "yes" else -fc
-                        net_lots[t] = net_lots.get(t, 0) + delta
-                        
-                    positions = []
+                        all_trades.append(TradeRow(
+                            ts_str=_ts(display_ts),
+                            game_matchup=game_matchup.upper(),
+                            ticker_type=ticker_type,
+                            ticker_short=ticker_short,
+                            ticker=raw_ticker,
+                            exec_type=exec_type,
+                            side=order.side,
+                            limit_cents=order.limit_cents,
+                            fill_cents=fill_c,
+                            count=order.intent_count if order.intent_count else fc,
+                            filled_count=fc,
+                            current_cents=cur_v,
+                            pnl_cents=pnl_c,
+                            fee_cents=fee_c,
+                        ))
+
+                    all_trades.sort(key=lambda t: t.ts_str, reverse=True)
+
+                    net_lots: dict[str, int] = {}
+                    for order in orders:
+                        if order.filled_count == 0:
+                            continue
+                        delta = order.filled_count if order.side == "yes" else -order.filled_count
+                        net_lots[order.ticker] = net_lots.get(order.ticker, 0) + delta
+
+                    positions: list[PositionRow] = []
                     for ticker, net in sorted(net_lots.items()):
-                        if net == 0: continue
+                        if net == 0:
+                            continue
                         cur_yes = price_snapshot.get(ticker)
                         d = "YES" if net > 0 else "NO"
                         cv = cur_yes if d == "YES" else (100 - cur_yes if cur_yes is not None else None)
-                        positions.append({
-                            "ticker_suffix": ticker.split("-")[-1],
-                            "direction": d,
-                            "lots": abs(net),
-                            "current_cents": cv,
-                        })
+                        positions.append(PositionRow(
+                            ticker_suffix=ticker.split("-")[-1],
+                            direction=d,
+                            lots=abs(net),
+                            current_cents=cv,
+                        ))
 
-                    total_pnl = sum(o["pnl_cents"] for o in all_orders if o["pnl_cents"] is not None)
-                    total_fees = sum(o["fee_cents"] for o in all_orders)
+                    total_pnl = sum(t.pnl_cents for t in all_trades if t.pnl_cents is not None)
+                    total_fees = sum(t.fee_cents for t in all_trades)
 
                     # Group games
-                    games_set = set(o.get("game_matchup", "?") for o in all_orders)
-                    per_game_pnl = {g: sum(o["pnl_cents"] for o in all_orders if o.get("game_matchup") == g) for g in games_set}
-                    per_game_fees = {g: sum(o["fee_cents"] for o in all_orders if o.get("game_matchup") == g) for g in games_set}
+                    games_set = set(t.game_matchup for t in all_trades)
+                    per_game_pnl = {g: sum(t.pnl_cents for t in all_trades if t.game_matchup == g) for g in games_set}
+                    per_game_fees = {g: sum(t.fee_cents for t in all_trades if t.game_matchup == g) for g in games_set}
 
-                    self._send_json(json.dumps({
-                        "trades": all_orders,
-                        "sweeps": [],
-                        "positions": positions,
-                        "pnl_cents": total_pnl,
-                        "fee_cents": total_fees,
-                        "per_sweep_pnl": {},
-                        "games": sorted(games_set),
-                        "per_game_pnl": per_game_pnl,
-                        "per_game_fees": per_game_fees,
-                        "timestamp": _ts(now),
-                    }).encode())
+                    response = TradesResponse(
+                        trades=all_trades,
+                        positions=positions,
+                        pnl_cents=total_pnl,
+                        fee_cents=total_fees,
+                        games=sorted(games_set),
+                        per_game_pnl=per_game_pnl,
+                        per_game_fees=per_game_fees,
+                        timestamp=_ts(now),
+                    )
+                    self._send_json(json.dumps(response.to_dict()).encode())
 
                 elif self.path == "/api/config":
                     self._send_json(json.dumps({}).encode())

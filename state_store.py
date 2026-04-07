@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from general_quoter_models import OrderRecord
+
 _DIR   = Path(__file__).parent
 _STORE = _DIR / ".kalshi_state.json"
 _LOCK  = _DIR / ".kalshi_state.lock"
@@ -38,10 +40,14 @@ class _Lock:
 def load() -> dict:
     return _load_raw()
 
-def append_order(rec: dict) -> None:
+def load_orders() -> list[OrderRecord]:
+    d = _load_raw()
+    return [OrderRecord.from_dict(o) for o in d.get("orders", [])]
+
+def append_order(rec: OrderRecord) -> None:
     with _Lock():
         d = _load_raw()
-        d["orders"].append(rec)
+        d["orders"].append(rec.to_dict())
         _save_raw(d)
 
 def patch_order(order_id: str, **updates: Any) -> None:
